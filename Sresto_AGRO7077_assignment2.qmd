@@ -1,0 +1,406 @@
+---
+title: "Assignment 2: Raster Arithmetic & Statistics"
+author: "Mizbah Ahmed Sresto"
+format:
+  html:
+    embed-resources: true
+    code-fold: false
+    toc: true
+output-file: Sresto_AGRO7077_assignment2.html
+execute:
+  echo: true
+---
+
+## Introduction
+
+In this assignment, I analyze SMAP Level 4 rootzone soil moisture rasters for December 13 and December 15, 2021. I use the sample data provided in the course repository.
+
+First, I count the pixels with soil moisture within the range [0.3, 0.4] on December 13. Next, I calculate the percentage change in this pixel count on December 15 relative to December 13. Finally, I compare the soil moisture density distributions for both dates on the same axes.
+
+## Setup and data preparation
+
+I use the `terra` package to import and analyze the rasters. I specify my assignment folder directly so that the data paths also work when Quarto renders the document in a new R session.
+
+```{r}
+#| label: setup
+
+# I install terra if it is not already available.
+if (!requireNamespace("terra", quietly = TRUE)) {
+  install.packages("terra", repos = "https://cloud.r-project.org")
+}
+
+# I load terra for raster analysis.
+library(terra)
+
+# Then I specify my assignment folder.
+assignment_folder = paste0(
+  "D:/Fall 2026 Courses/",
+  "AGRO 7077 R for Spatial Analysis & Visualization/",
+  "Assignments/Assignment 2"
+)
+
+# I specify the folder where I will store the sample rasters.
+data_folder = file.path(
+  assignment_folder,
+  "SampleData-master",
+  "SMAPL4_rasters"
+)
+
+# Checking here if it does not already exist.
+dir.create(
+  data_folder,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+```
+
+I download the two required rasters from the course sample data repository if they are missing. Files that are already present are reused.
+
+```{r}
+#| label: download-data
+
+# I specify the filenames used in the course notes.
+filenames = c(
+  "SMAP_L4_SM_gph_20211213T103000_Vv6030_001_Geophysical_Data_sm_rootzone_2052db45.tif",
+  "SMAP_L4_SM_gph_20211215T103000_Vv6030_001_Geophysical_Data_sm_rootzone_23bd7fe2.tif"
+)
+
+# Specifying the GitHub location of the sample rasters.
+github_folder = paste0(
+  "https://raw.githubusercontent.com/",
+  "Vinit-Sehgal/SampleData/master/SMAPL4_rasters/"
+)
+
+# Additional time for the downloads.
+options(timeout = max(600, getOption("timeout")))
+
+# Downloading each raster if its local file is missing or empty.
+for (filename in filenames) {
+
+  local_file = file.path(data_folder, filename)
+
+  if (!file.exists(local_file) ||
+      file.info(local_file)$size == 0) {
+
+    download.file(
+      url = paste0(github_folder, filename),
+      destfile = local_file,
+      mode = "wb"
+    )
+  }
+}
+```
+
+I import both rasters and replace the fill value `-9999` with `NA`. This prevents missing-data codes from affecting the analysis. I retain these cells as missing rather than assigning them a soil moisture value.
+
+```{r}
+#| label: prepare-rasters
+
+# I import the December 13 and December 15 rasters.
+SMday13 = rast(file.path(data_folder, filenames[1]))
+SMday15 = rast(file.path(data_folder, filenames[2]))
+
+# I replace missing-data fill values with NA.
+SMday13[SMday13 == -9999] = NA
+SMday15[SMday15 == -9999] = NA
+
+# I check that the rasters use the same spatial grid.
+compareGeom(SMday13, SMday15, stopOnError = TRUE)
+
+# I inspect the properties of both rasters.
+SMday13
+SMday15
+```
+
+
+## Visualizing the soil moisture rasters
+
+Before calculating the pixel counts, I plot the soil moisture rasters for December 13 and December 15, 2021. I use the same color palette and soil moisture limits for both maps so that the colors represent the same values on each date. Missing pixels appear in light gray.
+
+These maps help me inspect the spatial distribution of rootzone soil moisture before comparing the pixel counts and density distributions.
+
+```{r}
+#| label: raster-visualization
+#| fig-width: 12
+#| fig-height: 5
+#| fig-cap: "Rootzone soil moisture on December 13 and December 15, 2021. Both maps use the same color scale, with missing pixels shown in light gray."
+
+# I combine the two dates into a multilayer raster.
+SM_comparison = c(SMday13, SMday15)
+
+# I calculate the minimum and maximum for each raster.
+minimum_values = global(SM_comparison, min, na.rm = TRUE)
+maximum_values = global(SM_comparison, max, na.rm = TRUE)
+
+# I define common color limits using both dates.
+map_limits = c(
+  min(minimum_values[, 1]),
+  max(maximum_values[, 1])
+)
+
+# I create a palette that goes from dry brown to wet blue.
+soil_colors = colorRampPalette(
+  c("saddlebrown", "gold", "lightyellow", "lightblue", "darkblue")
+)(100)
+
+# I plot both rasters side by side using identical color limits.
+plot(
+  SM_comparison,
+  main = c("December 13, 2021", "December 15, 2021"),
+  nc = 2,
+  col = soil_colors,
+  range = map_limits,
+  colNA = "lightgray",
+  plg = list(title = "SM (m³/m³)")
+)
+```
+
+Brown and yellow shades represent relatively lower soil moisture, while blue shades represent relatively higher soil moisture. I compare the locations and extent of these patterns between the two dates. The calculations that follow quantify the number of pixels within [0.3, 0.4].
+
+
+## Task 1: Counting pixels within [0.3, 0.4]
+
+I define a function that counts pixels with soil moisture greater than or equal to 0.3 and less than or equal to 0.4. Both endpoints are included because the task specifies the closed interval [0.3, 0.4].
+
+The function accepts the range as an input argument. I apply it to the December 13 raster using `global()`, which passes the raster cell values to my function. The logical comparison returns `TRUE` for pixels within the range, and `sum()` counts those values while ignoring missing pixels.
+
+```{r}
+#| label: task1-pixel-count
+
+# I define a function that accepts cell values and a specified range.
+count_pixels = function(x, value_range) {
+
+  # I count pixels within the range, including both endpoints.
+  pixel_count = sum(
+    x >= value_range[1] & x <= value_range[2],
+    na.rm = TRUE
+  )
+
+  # I return the number of qualifying pixels.
+  return(pixel_count)
+}
+
+# I apply my function using global and pass the range as an argument.
+result13 = global(
+  SMday13,
+  fun = count_pixels,
+  value_range = c(0.3, 0.4)
+)
+
+# I extract the numerical count from the output data frame.
+count13 = result13[1, 1]
+
+# I display the result.
+cat(
+  "Pixels within [0.3, 0.4] on December 13, 2021:",
+  count13, "\n"
+)
+```
+
+**Result:** On December 13, 2021, I found **`r format(count13, big.mark = ",", scientific = FALSE, trim = TRUE)` pixels** with rootzone soil moisture within [0.3, 0.4].
+
+## Task 2: Percentage change in pixel count
+
+I apply the same function and soil moisture range to the December 15 raster. I then calculate the percentage change using December 13 as the baseline:
+
+$$
+\text{Percentage change}
+=
+\frac{N_{\text{Dec 15}}-N_{\text{Dec 13}}}
+{N_{\text{Dec 13}}}
+\times 100
+$$
+
+Here, each $N$ represents the number of pixels within [0.3, 0.4]. A positive percentage indicates an increase in the count, and a negative percentage indicates a decrease.
+
+```{r}
+#| label: task2-percentage-change
+
+# I count the qualifying pixels in the December 15 raster.
+result15 = global(
+  SMday15,
+  fun = count_pixels,
+  value_range = c(0.3, 0.4)
+)
+
+# I extract the December 15 count.
+count15 = result15[1, 1]
+
+# I check that the baseline count is not zero.
+if (count13 == 0) {
+  stop("Percentage change is undefined because the baseline count is zero.")
+}
+
+# I calculate the percentage change relative to December 13.
+percentage_change = ((count15 - count13) / count13) * 100
+
+# I organize the counts into a results table.
+count_table = data.frame(
+  Date = c("December 13, 2021", "December 15, 2021"),
+  Pixels_in_range = c(count13, count15)
+)
+
+# I display the table.
+knitr::kable(
+  count_table,
+  col.names = c("Date", "Pixels within [0.3, 0.4]"),
+  caption = "Pixel counts for the two dates."
+)
+
+# I display the percentage change.
+cat(
+  "\nPercentage change:",
+  round(percentage_change, 2), "%\n"
+)
+
+# I prepare a description that matches the calculated result.
+change_description = if (percentage_change > 0) {
+  "an increase"
+} else if (percentage_change < 0) {
+  "a decrease"
+} else {
+  "no change"
+}
+```
+
+**Result:** The pixel count changed from **`r format(count13, big.mark = ",", scientific = FALSE, trim = TRUE)`** on December 13 to **`r format(count15, big.mark = ",", scientific = FALSE, trim = TRUE)`** on December 15. The percentage change was **`r sprintf("%.2f", percentage_change)`%**, indicating **`r change_description`** in the number of pixels within the specified range.
+
+This percentage describes the change in pixel count within the interval. It does not measure the percentage change in soil moisture at each individual pixel.
+
+## Task 3: Comparing soil moisture density distributions
+
+I compare the density distributions using all valid soil moisture values from both rasters. I plot both curves on the same axes so that their shapes, peaks, and spread can be compared directly.
+
+I use the same smoothing bandwidth for both dates to make the comparison consistent. The horizontal axis represents rootzone soil moisture in cubic meters of water per cubic meter of soil. The vertical axis represents probability density rather than pixel count. The dotted vertical lines mark 0.3 and 0.4, the limits used in Tasks 1 and 2.
+
+```{r}
+#| label: task3-density-comparison
+#| fig-width: 9
+#| fig-height: 5.5
+#| fig-cap: "Density distributions of rootzone soil moisture on December 13 and December 15, 2021. Dotted vertical lines mark the interval [0.3, 0.4]."
+
+# I extract the cell values from each raster.
+sm13_values = as.numeric(values(SMday13))
+sm15_values = as.numeric(values(SMday15))
+
+# I retain only finite values for density estimation.
+sm13_values = sm13_values[is.finite(sm13_values)]
+sm15_values = sm15_values[is.finite(sm15_values)]
+
+# I check that each dataset contains enough valid values.
+if (length(sm13_values) < 2 || length(sm15_values) < 2) {
+  stop("Each raster needs at least two valid soil moisture values.")
+}
+
+# I calculate a common smoothing bandwidth for both curves.
+common_bw = mean(c(
+  bw.nrd0(sm13_values),
+  bw.nrd0(sm15_values)
+))
+
+# I identify the combined range of observed soil moisture.
+common_range = range(c(sm13_values, sm15_values))
+
+# I estimate the density distribution for December 13.
+density13 = density(
+  sm13_values,
+  bw = common_bw,
+  from = common_range[1],
+  to = common_range[2]
+)
+
+# I estimate the density distribution for December 15.
+density15 = density(
+  sm15_values,
+  bw = common_bw,
+  from = common_range[1],
+  to = common_range[2]
+)
+
+# I create a single plotting panel with room for the labels.
+par(
+  mfrow = c(1, 1),
+  mar = c(5, 5, 4, 2)
+)
+
+# I plot December 13 with axis limits that accommodate both curves.
+plot(
+  density13,
+  col = "blue",
+  lwd = 2,
+  xlim = common_range,
+  ylim = c(0, max(density13$y, density15$y) * 1.1),
+  main = "Soil Moisture Density Comparison",
+  xlab = expression("Rootzone soil moisture (" * m^3 / m^3 * ")"),
+  ylab = "Probability density"
+)
+
+# I overlay December 15 as a dashed red curve.
+lines(
+  density15,
+  col = "red",
+  lwd = 2,
+  lty = 2
+)
+
+# I mark the interval used in Tasks 1 and 2.
+abline(
+  v = c(0.3, 0.4),
+  col = "gray50",
+  lty = 3
+)
+
+# I add a legend to identify the dates.
+legend(
+  "topright",
+  legend = c("December 13, 2021", "December 15, 2021"),
+  col = c("blue", "red"),
+  lty = c(1, 2),
+  lwd = 2,
+  bty = "n"
+)
+```
+
+To support my comparison of the curves, I also calculate the median soil moisture for each date. The median summarizes the center of the observed values.
+
+```{r}
+#| label: task3-summary
+
+# I calculate the median soil moisture for each date.
+median13 = median(sm13_values)
+median15 = median(sm15_values)
+
+# I summarize the number of valid pixels and median soil moisture.
+distribution_table = data.frame(
+  Date = c("December 13, 2021", "December 15, 2021"),
+  Valid_pixels = c(length(sm13_values), length(sm15_values)),
+  Median_soil_moisture = c(median13, median15)
+)
+
+# I display the summary table.
+knitr::kable(
+  distribution_table,
+  digits = c(0, 0, 4),
+  col.names = c(
+    "Date",
+    "Valid pixels",
+    "Median soil moisture (m³/m³)"
+  ),
+  caption = "Summary of the soil moisture distributions."
+)
+
+# I describe the direction of the median difference.
+median_description = if (median15 > median13) {
+  "higher"
+} else if (median15 < median13) {
+  "lower"
+} else {
+  "the same"
+}
+```
+
+The median soil moisture was **`r sprintf("%.4f", median13)` m³/m³** on December 13 and **`r sprintf("%.4f", median15)` m³/m³** on December 15. The December 15 median was **`r median_description`** compared with December 13.
+
+The density curves show how soil moisture values are distributed across the valid pixels. Higher sections of a curve indicate a greater concentration of values near that soil moisture level. Overlapping portions indicate similar distributions, while differences between the curves show changes in the relative concentration of values. Because each density distribution is normalized, I use the counts in Tasks 1 and 2 to quantify the change in the number of pixels within [0.3, 0.4].
+
+
